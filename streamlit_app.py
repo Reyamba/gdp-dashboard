@@ -349,7 +349,7 @@ if __name__ == '__main__':
     "frosty pod rot_00002.png": "Frosty_Pod_Rot",
     "frosty pod rot_00003.png": "Frosty_Pod_Rot",
     "healthy_00003.png": "Healthy",
-}
+
 
 CLASS_NAMES = sorted(list(set(IMAGE_CLASS_DEFINITIONS.values())))
 NUM_CLASSES = len(CLASS_NAMES)
