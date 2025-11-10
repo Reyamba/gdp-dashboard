@@ -11,16 +11,22 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix
 import base64
 
+# Conditional import for seaborn (used for confusion matrix)
+try:
+    import seaborn as sns
+    SEABORN_AVAILABLE = True
+except ImportError:
+    st.warning("Seaborn not found. The Confusion Matrix will be displayed using Matplotlib only.")
+    SEABORN_AVAILABLE = False
+
+
 # --- 1. Data Preparation and Loading ---
 
 # Define the image files and their corresponding labels
-# The tool provides file paths as contentFetchIds when accessible, but for a runnable
-# script, we must use the accessible filenames with the content_fetcher.
-# We will use a dictionary to map file names to their simulated labels for training.
+# The list of files provided by the user is used here to define classes.
 
-# Mapping of file names provided by the user to their classes
 IMAGE_PATHS_AND_LABELS = {
-    "Witches_00005.jpeg": "Witches_Broom", # Assuming this Witches file refers to Witches_Broom
+    "Witches_00005.jpeg": "Witches_Broom",
     "witches broom_00001.png": "Witches_Broom",
     "witches broom_00002.png": "Witches_Broom",
     "witches broom_00003.png": "Witches_Broom",
@@ -35,6 +41,270 @@ IMAGE_PATHS_AND_LABELS = {
 CLASS_NAMES = sorted(list(set(IMAGE_PATHS_AND_LABELS.values())))
 NUM_CLASSES = len(CLASS_NAMES)
 IMAGE_SIZE = (128, 128)
+BATCH_SIZE = 4
+EPOCHS = 10 
+
+# Function to simulate loading the images 
+@st.cache_data
+def load_image_data_for_training():
+    """Generates dummy data for training simulation due to file access restrictions."""
+    num_samples = len(IMAGE_PATHS_AND_LABELS)
+    
+    # Check if there's enough data for all classes in test split (20% of 10 is 2, need at least 1 per class)
+    # Since we have very few samples, we'll use a larger test split to get meaningful arrays, but the results remain simulated.
+    if num_samples < 5:
+        st.error("Insufficient samples for robust training/testing. Using dummy data for demonstration.")
+    
+    # Generate dummy data for the small set of images
+    image_data = np.random.rand(num_samples, IMAGE_SIZE[0], IMAGE_SIZE[1], 3).astype(np.float32)
+    labels_list = list(IMAGE_PATHS_AND_LABELS.values())
+    label_to_index = {name: i for i, name in enumerate(CLASS_NAMES)}
+    label_indices = np.array([label_to_index[label] for label in labels_list])
+
+    # Convert labels to one-hot encoding
+    label_one_hot = tf.keras.utils.to_categorical(label_indices, num_classes=NUM_CLASSES)
+    return image_data, label_one_hot
+
+# --- 2. Model Definition and Training ---
+
+@st.cache_resource
+def build_and_train_model():
+    """Builds, compiles, and trains the CNN model."""
+    st.info("Loading and processing data...")
+    
+    # Load simulated data
+    X, y = load_image_data_for_training()
+
+    # Split the limited dataset
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=np.argmax(y, axis=1))
+
+    # Define the CNN Model
+    model = keras.Sequential([
+        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3)),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(128, (3, 3), activation='relu', name='last_conv_layer'), # Target layer for Grad-CAM
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(256, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(NUM_CLASSES, activation='softmax')
+    ])
+
+    # Compile the model
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+
+    st.info("Training CNN Model... (Using simulated data for demonstration)")
+    
+    # Train the model
+    history = model.fit(
+        X_train, y_train,
+        epochs=EPOCHS,
+        validation_data=(X_test, y_test),
+        verbose=0
+    )
+
+    # Evaluate the model
+    loss, acc = model.evaluate(X_test, y_test, verbose=0)
+
+    # Generate Classification Report and Confusion Matrix
+    y_pred = model.predict(X_test)
+    y_pred_classes = np.argmax(y_pred, axis=1)
+    y_true_classes = np.argmax(y_test, axis=1)
+
+    # Handle case where the split might not contain all classes (due to extremely small dataset)
+    try:
+        report = classification_report(y_true_classes, y_pred_classes, target_names=CLASS_NAMES, output_dict=True, zero_division=0)
+    except ValueError:
+        report = {'accuracy': 0.0, 'macro avg': {'precision': 0.0, 'recall': 0.0, 'f1-score': 0.0, 'support': 0}}
+    
+    conf_mat = confusion_matrix(y_true_classes, y_pred_classes)
+
+    return model, history, acc, report, conf_mat, X_test, y_test
+
+# --- 3. Advanced Grad-CAM Implementation ---
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    """
+    Computes and returns the Grad-CAM heatmap.
+    """
+    grad_model = tf.keras.models.Model(
+        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
+    )
+
+    with tf.GradientTape() as tape:
+        last_conv_layer_output, preds = grad_model(img_array[np.newaxis, ...])
+        if pred_index is None:
+            pred_index = tf.argmax(preds[0])
+        class_channel = preds[:, pred_index]
+
+    grads = tape.gradient(class_channel, last_conv_layer_output)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+    last_conv_layer_output = last_conv_layer_output[0]
+    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-8) # Add epsilon for stability
+    heatmap = heatmap.numpy()
+
+    return heatmap, preds[0].numpy()
+
+def display_gradcam(img, heatmap, alpha=0.5):
+    """
+    Overlays the heatmap on the original image and returns a new image (as bytes).
+    """
+    if 'cv2' not in globals():
+        return None, "OpenCV (cv2) is not available to generate the Grad-CAM visualization."
+
+    # Rescale heatmap to a range 0-255
+    heatmap = np.uint8(255 * heatmap)
+
+    # Use OpenCV to resize and apply color map
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) 
+    resized_heatmap = cv2.resize(heatmap, (img.shape[1], img.shape[0]))
+    colormap = cv2.COLORMAP_JET
+    heatmap_jet = cv2.applyColorMap(resized_heatmap, colormap)
+
+    # Create the superimposed image
+    superimposed_img_bgr = cv2.addWeighted(img_bgr, 1.0 - alpha, heatmap_jet, alpha, 0)
+
+    # Convert back to RGB for Matplotlib/Streamlit display
+    superimposed_img_rgb = cv2.cvtColor(superimposed_img_bgr, cv2.COLOR_BGR2RGB)
+
+    # Convert the resulting image to bytes to display in Streamlit
+    is_success, buffer = cv2.imencode(".png", cv2.cvtColor(superimposed_img_rgb, cv2.COLOR_RGB2BGR))
+    if is_success:
+        return buffer.tobytes(), None
+    return None, "Failed to encode Grad-CAM image."
+
+def process_uploaded_image(uploaded_file, model):
+    """Handles uploaded file, runs prediction, and generates Grad-CAM."""
+    
+    # 1. Read the image file using Streamlit/Numpy (safer than direct cv2 file read)
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    
+    # Check if cv2 is available for image decoding
+    if 'cv2' not in globals():
+        st.error("Cannot proceed: OpenCV (cv2) is required for image processing but could not be imported. Please ensure 'opencv-python' is installed.")
+        return "N/A", 0.0, None
+
+    img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # 2. Preprocess the image for the model
+    # Note: cv2.resize expects (width, height), Keras expects (height, width) for image size
+    img_model_input = cv2.resize(img_rgb, (IMAGE_SIZE[1], IMAGE_SIZE[0]))
+    img_array = img_model_input.astype('float32') / 255.0
+
+    # 3. Run Grad-CAM
+    LAST_CONV_LAYER_NAME = 'last_conv_layer'
+    heatmap, preds = make_gradcam_heatmap(img_array, model, LAST_CONV_LAYER_NAME)
+
+    # 4. Get prediction result
+    predicted_class_index = np.argmax(preds)
+    predicted_class = CLASS_NAMES[predicted_class_index]
+    confidence = preds[predicted_class_index] * 100
+
+    # 5. Generate the Grad-CAM visualization
+    gradcam_img_bytes, error = display_gradcam(img_rgb, heatmap, alpha=0.5)
+    
+    if error:
+        st.error(error)
+        return predicted_class, confidence, None
+
+    return predicted_class, confidence, gradcam_img_bytes
+
+# --- 4. Streamlit Application ---
+
+def main():
+    st.set_page_config(layout="wide", page_title="Advanced Disease Detector")
+
+    st.title("🌿 Cacao Disease Detector & Grad-CAM Visualization")
+    st.markdown("A Convolutional Neural Network (CNN) for detecting Cacao plant diseases, enhanced with Grad-CAM for model explainability. *(Using simulated training data)*")
+
+    # --- Sidebar for Model Metrics ---
+    st.sidebar.title("Model Training & Metrics")
+    st.sidebar.info(f"Model trained on **{NUM_CLASSES}** classes: {', '.join(CLASS_NAMES)}")
+
+    # Build and train the model (cached to run only once)
+    with st.spinner("Building and training the model... (Simulated to run even with the small dataset)"):
+        model, history, acc, report, conf_mat, X_test, y_test = build_and_train_model()
+        st.success("Model trained successfully!")
+
+    # Display Model Validation and Accuracy Testing
+    st.sidebar.header("Model Validation Results")
+    st.sidebar.markdown(f"**Test Set Accuracy:** **{acc:.2f}** (Simulated)")
+    
+    if history.history:
+        st.sidebar.markdown(f"**Test Loss:** **{history.history['val_loss'][-1]:.4f}** (Simulated)")
+
+    with st.sidebar.expander("Detailed Classification Report"):
+        report_df = pd.DataFrame(report).transpose()
+        st.dataframe(report_df, use_container_width=True)
+
+    if SEABORN_AVAILABLE:
+        with st.sidebar.expander("Confusion Matrix"):
+            fig, ax = plt.subplots(figsize=(6, 6))
+            
+            # Predict on the test set for the matrix
+            y_pred_classes_cmat = np.argmax(model.predict(X_test, verbose=0), axis=1)
+            y_true_classes_cmat = np.argmax(y_test, axis=1)
+
+            cmat_disp = confusion_matrix(y_true_classes_cmat, y_pred_classes_cmat)
+            
+            sns.heatmap(cmat_disp, annot=True, fmt='d', cmap='Blues', cbar=False,
+                        xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax)
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('True')
+            ax.set_title('Confusion Matrix (Simulated)')
+            st.pyplot(fig)
+    else:
+         st.sidebar.warning("Seaborn is required to display the Confusion Matrix plot.")
+
+    # --- Main App for Prediction ---
+    st.header("Upload Image for Prediction")
+
+    uploaded_file = st.file_uploader(
+        "Choose a Cacao plant or pod image (JPEG/PNG)",
+        type=["jpg", "jpeg", "png"]
+    )
+
+    if uploaded_file is not None:
+        st.subheader("Results")
+        col1, col2 = st.columns(2)
+
+        # Process and Predict
+        predicted_class, confidence, gradcam_img_bytes = process_uploaded_image(uploaded_file, model)
+        
+        # Display Original Image
+        with col1:
+            st.markdown("<p style='text-align: center; font-size: 1.25rem; font-weight: bold;'>Original Image</p>", unsafe_allow_html=True)
+            st.image(uploaded_file, use_column_width=True)
+            st.markdown(f"**Predicted Disease:** <span style='color: #1E88E5; font-size: 1.5rem;'>**{predicted_class}**</span>", unsafe_allow_html=True)
+            st.markdown(f"**Confidence:** <span style='color: #4CAF50; font-size: 1.5rem;'>**{confidence:.2f}%**</span>", unsafe_allow_html=True)
+
+
+        # Display Grad-CAM
+        with col2:
+            st.markdown("<p style='text-align: center; font-size: 1.25rem; font-weight: bold;'>Grad-CAM Visualization</p>", unsafe_allow_html=True)
+            if gradcam_img_bytes:
+                # Use base64 encoding to display the image bytes in Streamlit
+                base64_img = base64.b64encode(gradcam_img_bytes).decode('utf-8')
+                st.image(f"data:image/png;base64,{base64_img}", use_column_width=True)
+            else:
+                st.error("Could not generate Grad-CAM visualization. Ensure OpenCV is installed.")
+
+            st.markdown("""
+            **What is Grad-CAM?**
+            The Gradient-weighted Class Activation Map (Grad-CAM) highlights the important regions in the image (red/yellow areas) that the model used to make its classification decision.
+            """, unsafe_allow_html=True)
+
+    else:
+        st.info("Please upload an image to start the disease detection and visualization process.")
+
+if __name__ == '__main__':
+    main()IMAGE_SIZE = (128, 128)
 BATCH_SIZE = 4
 EPOCHS = 10 # Reduced epochs for fast demonstration
 
