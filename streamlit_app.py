@@ -337,17 +337,13 @@ if __name__ == '__main__':
         'Year',
         'GDP',
     )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
+# ... code block
+    def load_gdp_data():
+        # ... function logic
+        gdp_df = pd.read_csv('gdp.csv')
+        # ... some processing
+        return gdp_df # <- CORRECT: Indented inside the function
+# Execution continues here
 # Set the title that appears at the top of the page.
 '''
 # :earth_americas: GDP dashboard
