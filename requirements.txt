@@ -1,8 +1,5 @@
 streamlit
 tensorflow
 numpy
-opencv-python
-pandas
 matplotlib
-scikit-learn
-seaborn
+Pillow
