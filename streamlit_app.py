@@ -486,6 +486,232 @@ st.markdown("### How to Run This App")
 st.code("streamlit run streamlit_cocoa_detector.py")
 st.markdown("1. Save the code above as `streamlit_cocoa_detector.py`.")
 st.markdown("2. Ensure you have the required libraries installed: `pip install streamlit tensorflow numpy matplotlib Pillow`.")
+st.markdown("3. Run the command above in your terminal.")    # NOTE: In a real app, you would load pre-trained weights here:
+    # try:
+    #     model.load_weights('cocoa_detection_weights.h5')
+    # except:
+    #     st.warning("Weights not found. Using randomly initialized model for demonstration.")
+    
+    st.success("CNN Model loaded successfully (using random weights).")
+    return model
+
+# --- 2. Grad-CAM Implementation ---
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    """
+    Computes and returns the Grad-CAM heatmap.
+    Based on the official Keras Grad-CAM example.
+    """
+    # Create a model that maps the input image to the activations of the last conv layer
+    # and the final output layer.
+    grad_model = Model(
+        model.inputs, [model.get_layer(last_conv_layer_name).output, model.output]
+    )
+
+    # Use tf.GradientTape to compute gradients
+    with tf.GradientTape() as tape:
+        last_conv_layer_output, preds = grad_model(img_array[np.newaxis, ...])
+        
+        # If no specific index is provided, use the index of the highest prediction
+        if pred_index is None:
+            pred_index = tf.argmax(preds[0])
+        
+        # Get the loss for the predicted class
+        class_channel = preds[:, pred_index]
+
+    # Compute the gradient of the predicted class output with respect to the last conv layer output
+    grads = tape.gradient(class_channel, last_conv_layer_output)
+    
+    # Compute the spatial average of the gradients (Global Average Pooling)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+    
+    # Multiply the activation map by the weights (pooled gradients)
+    last_conv_layer_output = last_conv_layer_output[0]
+    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+
+    # Normalize the heatmap between 0 and 1
+    heatmap = tf.maximum(heatmap, 0) / tf.reduce_max(heatmap)
+    
+    return heatmap.numpy(), pred_index
+
+def display_gradcam(img, heatmap, alpha=0.4):
+    """Overlays the heatmap on the original image."""
+    
+    # Rescale heatmap to a range 0-255
+    heatmap = np.uint8(255 * heatmap)
+
+    # Use colormap jet to generate the colors for the heatmap
+    jet = plt.cm.get_cmap("jet")
+    
+    # Use RGB values of the colormap
+    jet_colors = jet(np.arange(256))[:, :3]
+    jet_heatmap = jet_colors[heatmap]
+
+    # Create an image with RGB colorized heatmap
+    jet_heatmap = keras.utils.array_to_img(jet_heatmap)
+    jet_heatmap = jet_heatmap.resize((img.shape[1], img.shape[0]))
+    jet_heatmap = keras.utils.img_to_array(jet_heatmap)
+
+    # Superimpose the heatmap on the original image
+    superimposed_img = jet_heatmap * alpha + img
+    superimposed_img = keras.utils.array_to_img(superimposed_img)
+    
+    return superimposed_img
+
+
+# --- 3. Streamlit App Functions ---
+
+def preprocess_image(image_file):
+    """Load, resize, and normalize the image."""
+    img = Image.open(image_file).convert('RGB')
+    
+    # Keep original image for overlay
+    img_array_original = np.array(img.resize((IMG_SIZE, IMG_SIZE)))
+    
+    # Preprocess for model
+    img = img.resize((IMG_SIZE, IMG_SIZE))
+    img_array = keras.utils.img_to_array(img)
+    img_array = img_array / 255.0  # Normalize to 0-1
+    
+    return img_array, img_array_original
+
+# --- Streamlit UI Layout ---
+
+st.set_page_config(
+    page_title="Cocoa Disease Detector (CNN + Grad-CAM)",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Load the model once
+model = build_and_initialize_model()
+
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #f7f3e8; /* Light cocoa/cream background */
+    }
+    .header-title {
+        color: #4b2c15; /* Dark chocolate text */
+        font-family: 'Inter', sans-serif;
+        font-weight: 800;
+        font-size: 2.5em;
+    }
+    .st-emotion-cache-1pxn4lb { /* Adjust main content padding */
+        padding-top: 2rem;
+    }
+    .stButton>button {
+        background-color: #795548; /* Brown button */
+        color: white;
+        border-radius: 12px;
+        border: none;
+        padding: 10px 20px;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+        transition: all 0.3s;
+    }
+    .stButton>button:hover {
+        background-color: #5d4037;
+        transform: translateY(-2px);
+        box-shadow: 4px 4px 8px rgba(0,0,0,0.3);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+st.markdown('<div class="header-title">🍫 Cocoa Disease AI Detector & Explainer</div>', unsafe_allow_html=True)
+st.markdown("---")
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.header("Upload Image")
+    st.markdown("Upload a photo of a cocoa pod or leaf to detect potential diseases.")
+    uploaded_file = st.file_uploader("Choose an Image...", type=["jpg", "jpeg", "png"])
+    
+    if uploaded_file is not None:
+        # Display the uploaded image
+        st.image(uploaded_file, caption='Uploaded Cocoa Image', use_column_width=True)
+        
+        # Process and Predict
+        img_array_norm, img_array_orig = preprocess_image(uploaded_file)
+        
+        if st.button('Analyze Cocoa Image'):
+            # Run Prediction
+            with st.spinner('Analyzing image and calculating Grad-CAM...'):
+                predictions = model.predict(img_array_norm[np.newaxis, ...])[0]
+                pred_index = np.argmax(predictions)
+                
+                # Run Grad-CAM
+                heatmap, final_pred_index = make_gradcam_heatmap(
+                    img_array_norm, 
+                    model, 
+                    LAST_CONV_LAYER_NAME, 
+                    pred_index=pred_index
+                )
+                
+                gradcam_img = display_gradcam(img_array_orig, heatmap)
+            
+            # Save results to session state
+            st.session_state['pred_class'] = CLASS_NAMES[pred_index]
+            st.session_state['confidence'] = predictions[pred_index]
+            st.session_state['all_predictions'] = dict(zip(CLASS_NAMES, predictions))
+            st.session_state['gradcam_img'] = gradcam_img
+            
+with col2:
+    st.header("Detection Results")
+    st.markdown("The model's classification and its area of focus (Grad-CAM) will appear here.")
+    
+    if 'pred_class' in st.session_state:
+        st.subheader("Classification:")
+        
+        # Display main result
+        pred_class = st.session_state['pred_class']
+        confidence = st.session_state['confidence']
+        st.markdown(f"**Result:** <span style='font-size: 1.5em; color: #d32f2f; font-weight: bold;'>{pred_class}</span>", unsafe_allow_html=True)
+        st.markdown(f"**Confidence:** `{confidence * 100:.2f}%`")
+        
+        st.subheader("Model Explanation (Grad-CAM):")
+        
+        # Display Grad-CAM image
+        st.image(
+            st.session_state['gradcam_img'], 
+            caption=f'Grad-CAM Heatmap: Highlights the areas the model focused on for the "{pred_class}" prediction.', 
+            use_column_width=True
+        )
+
+        st.info("The colored overlay (heatmap) shows the regions of the image that contributed most significantly to the model's prediction. Red/Yellow areas indicate high influence.")
+        
+        # Display all probabilities
+        st.subheader("All Probabilities")
+        all_preds = st.session_state['all_predictions']
+        
+        # Convert dictionary to a list of (class, prob) tuples and sort by probability
+        data = sorted(
+            [(k, v) for k, v in all_preds.items()], 
+            key=lambda item: item[1], 
+            reverse=True
+        )
+        
+        # Create a simple table
+        st.dataframe(
+            data=data,
+            column_config={
+                0: st.column_config.TextColumn("Disease/State", width="large"),
+                1: st.column_config.NumberColumn("Probability", format="%.4f", width="small")
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+# --- Instructions for the user ---
+st.markdown("---")
+st.markdown("### How to Run This App")
+st.code("streamlit run streamlit_cocoa_detector.py")
+st.markdown("1. Save the code above as `streamlit_cocoa_detector.py`.")
+st.markdown("2. Ensure you have the required libraries installed: `pip install streamlit tensorflow numpy matplotlib Pillow`.")
 st.markdown("3. Run the command above in your terminal.")        if pred_index is None:
             pred_index = tf.argmax(preds[0])
         
