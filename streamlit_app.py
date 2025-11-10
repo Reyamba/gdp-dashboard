@@ -36,6 +36,317 @@ IMAGE_FILE_DATA = [
     {"filename": "frosty pod rot_00002.png", "label": "Frosty_Pod_Rot"},
     {"filename": "frosty pod rot_00003.png", "label": "Frosty_Pod_Rot"},
     {"filename": "healthy_00003.png", "label": "Healthy"},
+] # Correctly closed list. No extra brackets here.
+
+CLASS_NAMES = sorted(list(set(item['label'] for item in IMAGE_FILE_DATA)))
+NUM_CLASSES = len(CLASS_NAMES)
+IMAGE_SIZE = (128, 128)
+BATCH_SIZE = 4 # Reduced batch size due to very small dataset
+EPOCHS = 15 # Increased epochs slightly for potentially better (simulated) learning
+
+
+# Placeholder for disease descriptions
+DISEASE_DESCRIPTIONS = {
+    "Healthy": {
+        "description": "The cacao plant shows no signs of disease and appears to be thriving. Healthy leaves are typically green, vibrant, and free from spots or discoloration.",
+        "causes": "Proper nutrition, adequate water, good sunlight, and protection from pests contribute to a healthy plant.",
+        "treatment": "Maintain optimal growing conditions."
+    },
+    "Witches_Broom": {
+        "description": "Witches' Broom disease, caused by the fungus Moniliophthora perniciosa, leads to abnormal, dense growths of shoots or 'brooms' and swollen stems. It can also affect pods, causing premature ripening and malformation.",
+        "causes": "Fungal infection (Moniliophthora perniciosa).",
+        "treatment": "Pruning infected parts, resistant varieties, fungicides. Strict phytosanitary measures are crucial.",
+        "severity": "High - can significantly reduce yield and lead to tree death if untreated."
+    },
+    "Black_Pod_Rot": {
+        "description": "Black Pod Rot, caused by various Phytophthora species, is characterized by rapidly spreading black or brown lesions on cacao pods, eventually covering the entire pod. It also affects flowers, cushions, and leaves.",
+        "causes": "Fungal-like oomycete infection (Phytophthora spp.), favored by high humidity and rainfall.",
+        "treatment": "Sanitation (removing infected pods), copper-based fungicides, good drainage, wider spacing of trees. Breeding for resistance is ongoing.",
+        "severity": "High - major cause of yield loss globally."
+    },
+    "Frosty_Pod_Rot": {
+        "description": "Frosty Pod Rot, caused by the fungus Moniliophthora roreri, initially appears as small, water-soaked spots on pods, which then develop a white, powdery fungal growth (like frost). The internal beans turn black and rot, making the pods commercially worthless.",
+        "causes": "Fungal infection (Moniliophthora roreri), spread by wind and rain.",
+        "treatment": "Strict sanitation (removing mummified pods), shade management, pruning, and developing resistant varieties. Fungicides are generally less effective once symptoms appear.",
+        "severity": "High - causes severe economic losses in affected regions."
+    }
+}
+
+
+@st.cache_data
+def load_images_from_web_simulated():
+    """
+    Simulates loading images from a web source for training purposes.
+    
+    ***IMPORTANT: For real deployment, you must replace the dummy image generation
+    with actual code to fetch images from PUBLIC, DIRECT web URLs.
+    Google Drive folder links are not directly accessible.***
+    """
+    
+    X = []
+    labels = []
+    
+    label_to_index = {name: i for i, name in enumerate(CLASS_NAMES)}
+    
+    for item in IMAGE_FILE_DATA:
+        # --- PLACEHOLDER FOR REAL WEB FETCHING LOGIC ---
+        # For simulation, we generate a dummy image:
+        dummy_img = np.random.rand(IMAGE_SIZE[0], IMAGE_SIZE[1], 3).astype(np.float32) * 255.0
+        X.append(dummy_img)
+        labels.append(item['label'])
+
+    X = np.array(X, dtype=np.float32) / 255.0 # Normalize dummy data
+    label_indices = np.array([label_to_index[label] for label in labels])
+    y = tf.keras.utils.to_categorical(label_indices, num_classes=NUM_CLASSES)
+    
+    return X, y
+
+# --- 2. Model Definition and Training ---
+
+@st.cache_resource
+def build_and_train_model():
+    """Builds, compiles, and trains the CNN model."""
+    st.info("Simulating data loading from a web source and processing...")
+    
+    X, y = load_images_from_web_simulated()
+
+    # Split the limited dataset, ensuring stratification for better class representation
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.3, random_state=42, stratify=np.argmax(y, axis=1)
+    )
+
+    model = keras.Sequential([
+        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3)),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(64, (3, 3), activation='relu'),
+        layers.MaxPooling2D((2, 2)),
+        layers.Conv2D(128, (3, 3), activation='relu', name='last_conv_layer'), # Target layer for Grad-CAM
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(256, activation='relu'),
+        layers.Dropout(0.5),
+        layers.Dense(NUM_CLASSES, activation='softmax')
+    ])
+
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+
+    st.info("Training CNN Model... (Using simulated web-sourced data)")
+    
+    history = model.fit(
+        X_train, y_train,
+        epochs=EPOCHS,
+        validation_data=(X_test, y_test),
+        verbose=0
+    )
+
+    loss, acc = model.evaluate(X_test, y_test, verbose=0)
+
+    y_pred = model.predict(X_test)
+    y_pred_classes = np.argmax(y_pred, axis=1)
+    y_true_classes = np.argmax(y_test, axis=1)
+
+    try:
+        report = classification_report(y_true_classes, y_pred_classes, target_names=CLASS_NAMES, output_dict=True, zero_division=0)
+    except ValueError:
+        report = {'accuracy': 0.0, 'macro avg': {'precision': 0.0, 'recall': 0.0, 'f1-score': 0.0, 'support': 0}}
+    
+    conf_mat = confusion_matrix(y_true_classes, y_pred_classes)
+
+    return model, history, acc, report, conf_mat, X_test, y_test
+
+# --- 3. Advanced Grad-CAM Implementation ---
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    """
+    Computes and returns the Grad-CAM heatmap.
+    """
+    grad_model = tf.keras.models.Model(
+        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
+    )
+
+    with tf.GradientTape() as tape:
+        last_conv_layer_output, preds = grad_model(img_array[np.newaxis, ...]) 
+        if pred_index is None:
+            pred_index = tf.argmax(preds[0])
+        class_channel = preds[:, pred_index]
+
+    grads = tape.gradient(class_channel, last_conv_layer_output)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+    last_conv_layer_output = last_conv_layer_output[0]
+    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    
+    # Ensure heatmap is not all zeros before division
+    if tf.reduce_max(heatmap) > 1e-8:
+        heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-8)
+    else:
+        heatmap = tf.zeros_like(heatmap) # Return all zeros if no activation
+        
+    heatmap = heatmap.numpy()
+
+    return heatmap, preds[0].numpy()
+
+def display_gradcam(img, heatmap, alpha=0.5):
+    """
+    Overlays the heatmap on the original image and returns a new image (as bytes).
+    """
+    if 'cv2' not in globals():
+        return None, "OpenCV (cv2) is not available to generate the Grad-CAM visualization."
+
+    heatmap = np.uint8(255 * heatmap)
+
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) 
+    resized_heatmap = cv2.resize(heatmap, (img.shape[1], img.shape[0]))
+    colormap = cv2.COLORMAP_JET
+    heatmap_jet = cv2.applyColorMap(resized_heatmap, colormap)
+
+    superimposed_img_bgr = cv2.addWeighted(img_bgr, 1.0 - alpha, heatmap_jet, alpha, 0)
+
+    superimposed_img_rgb = cv2.cvtColor(superimposed_img_bgr, cv2.COLOR_BGR2RGB)
+
+    is_success, buffer = cv2.imencode(".png", cv2.cvtColor(superimposed_img_rgb, cv2.COLOR_RGB2BGR))
+    if is_success:
+        return buffer.tobytes(), None
+    return None, "Failed to encode Grad-CAM image."
+
+def process_uploaded_image(uploaded_file, model):
+    """Handles uploaded file, runs prediction, and generates Grad-CAM."""
+    
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    
+    if 'cv2' not in globals():
+        st.error("Cannot proceed: OpenCV (cv2) is required for image processing.")
+        return "N/A", 0.0, None
+
+    img_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    # Ensure image is not None (decoding failed)
+    if img_bgr is None:
+        st.error("Uploaded file could not be decoded as an image. Please check the file format.")
+        return "N/A", 0.0, None
+
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    img_model_input = cv2.resize(img_rgb, (IMAGE_SIZE[1], IMAGE_SIZE[0]))
+    img_array = img_model_input.astype('float32') / 255.0
+
+    LAST_CONV_LAYER_NAME = 'last_conv_layer'
+    heatmap, preds = make_gradcam_heatmap(img_array, model, LAST_CONV_LAYER_NAME)
+
+    predicted_class_index = np.argmax(preds)
+    predicted_class = CLASS_NAMES[predicted_class_index]
+    confidence = preds[predicted_class_index] * 100
+
+    gradcam_img_bytes, error = display_gradcam(img_rgb, heatmap, alpha=0.5)
+    
+    if error:
+        st.error(error)
+        return predicted_class, confidence, None
+
+    return predicted_class, confidence, gradcam_img_bytes
+
+# --- 4. Streamlit Application ---
+
+def main():
+    st.set_page_config(layout="wide", page_title="Advanced Cacao Disease Detector")
+
+    st.title("🌿 Cacao Disease Detector & Explainable AI Dashboard")
+    st.markdown("Upload an image of your cacao plant or pod to detect common diseases (or confirm health) and see *where* the model is looking with Grad-CAM.")
+    st.info("The model is trained using a simulated dataset to demonstrate functionality. For real-world use, replace the dummy data loading with actual image fetching from a public web source.")
+    st.warning("🚨 **IMPORTANT:** Direct Google Drive folder links cannot be used for data loading in deployed Streamlit apps. Please host your data publicly (e.g., on GitHub raw links or dedicated image hosting) and update the `load_images_from_web_simulated` function.")
+
+    # --- Sidebar for Model Metrics ---
+    with st.sidebar:
+        st.title("Model Training & Metrics")
+        st.info(f"Model trained on **{NUM_CLASSES}** classes: {', '.join(CLASS_NAMES)}")
+
+        with st.spinner("Building and training the model..."):
+            model, history, acc, report, conf_mat, X_test, y_test = build_and_train_model()
+            st.success("Model trained successfully!")
+
+        st.header("Model Validation Results (Simulated)")
+        st.markdown(f"**Test Set Accuracy:** **{acc:.2f}**")
+        
+        if history.history:
+            st.markdown(f"**Test Loss:** **{history.history['val_loss'][-1]:.4f}**")
+
+        with st.expander("Detailed Classification Report"):
+            report_df = pd.DataFrame(report).transpose()
+            st.dataframe(report_df, use_container_width=True)
+
+        if SEABORN_AVAILABLE:
+            with st.expander("Confusion Matrix"):
+                fig, ax = plt.subplots(figsize=(6, 6))
+                
+                y_pred_classes_cmat = np.argmax(model.predict(X_test, verbose=0), axis=1)
+                y_true_classes_cmat = np.argmax(y_test, axis=1)
+
+                cmat_disp = confusion_matrix(y_true_classes_cmat, y_pred_classes_cmat)
+                
+                sns.heatmap(cmat_disp, annot=True, fmt='d', cmap='Blues', cbar=False,
+                            xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES, ax=ax)
+                ax.set_xlabel('Predicted')
+                ax.set_ylabel('True')
+                ax.set_title('Confusion Matrix (Simulated)')
+                st.pyplot(fig)
+        else:
+            st.warning("Seaborn is required to display the Confusion Matrix plot.")
+
+    # --- Main App for Prediction ---
+    st.header("Upload Cacao Image for Analysis")
+
+    uploaded_file = st.file_uploader(
+        "Upload an image of a cacao leaf or pod (JPEG/PNG)",
+        type=["jpg", "jpeg", "png"]
+    )
+
+    if uploaded_file is not None:
+        st.subheader("Analysis Results")
+        
+        # Create columns for original image, Grad-CAM, and description
+        col_img, col_gradcam, col_description = st.columns([1, 1, 1.5]) # Adjusted column width for description
+
+        # Process and Predict
+        predicted_class, confidence, gradcam_img_bytes = process_uploaded_image(uploaded_file, model)
+        
+        with col_img:
+            st.markdown("<p style='text-align: center; font-size: 1.25rem; font-weight: bold;'>Your Uploaded Image</p>", unsafe_allow_html=True)
+            st.image(uploaded_file, use_column_width=True)
+            st.markdown(f"**Predicted Status:** <span style='color: #1E88E5; font-size: 1.5rem;'>**{predicted_class}**</span>", unsafe_allow_html=True)
+            st.markdown(f"**Confidence:** <span style='color: #4CAF50; font-size: 1.5rem;'>**{confidence:.2f}%**</span>", unsafe_allow_html=True)
+
+        with col_gradcam:
+            st.markdown("<p style='text-align: center; font-size: 1.25rem; font-weight: bold;'>Model Focus (Grad-CAM)</p>", unsafe_allow_html=True)
+            if gradcam_img_bytes:
+                base64_img = base64.b64encode(gradcam_img_bytes).decode('utf-8')
+                st.image(f"data:image/png;base64,{base64_img}", use_column_width=True)
+                st.markdown("""
+                <small>The **red/yellow areas** indicate where the model focused its attention to make the prediction. This acts like an **arrow pointing to the key visual evidence** for the detected disease or health.</small>
+                """, unsafe_allow_html=True)
+            else:
+                st.error("Could not generate Grad-CAM visualization. Ensure OpenCV is installed.")
+        
+        with col_description:
+            st.markdown("<p style='text-align: center; font-size: 1.25rem; font-weight: bold;'>Detailed Information</p>", unsafe_allow_html=True)
+            if predicted_class in DISEASE_DESCRIPTIONS:
+                disease_info = DISEASE_DESCRIPTIONS[predicted_class]
+                st.markdown(f"### {predicted_class.replace('_', ' ')}")
+                st.markdown(f"**Description:** {disease_info.get('description', 'No detailed description available.')}")
+                if disease_info.get('causes'):
+                    st.markdown(f"**Causes:** {disease_info['causes']}")
+                if disease_info.get('treatment'):
+                    st.markdown(f"**Treatment/Management:** {disease_info['treatment']}")
+                if disease_info.get('severity'):
+                    st.markdown(f"**Severity:** {disease_info['severity']}")
+            else:
+                st.info("No specific description available for this prediction. Please refer to general cacao plant care.")
+
+    else:
+        st.info("Please upload an image of a cacao plant or pod to get started!")
+
+if __name__ == '__main__':
+    main()    {"filename": "frosty pod rot_00003.png", "label": "Frosty_Pod_Rot"},
+    {"filename": "healthy_00003.png", "label": "Healthy"},
 ]
 
 CLASS_NAMES = sorted(list(set(item['label'] for item in IMAGE_FILE_DATA)))
