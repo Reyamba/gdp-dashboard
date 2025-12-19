@@ -1,5 +1,7 @@
 streamlit
-tensorflow
+pandas
 numpy
 matplotlib
-Pillow
+plotly
+statsmodels
+scikit-learn
